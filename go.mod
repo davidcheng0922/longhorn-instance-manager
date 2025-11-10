@@ -13,6 +13,7 @@ require (
 	github.com/longhorn/longhorn-engine v1.10.0-dev-20250824.0.20251103012748-950f695edced
 	github.com/longhorn/longhorn-spdk-engine v0.0.0-20251023092409-3c3113c50437
 	github.com/longhorn/types v0.0.0-20251019113838-3455d9c2f5ca
+	github.com/panjf2000/ants/v2 v2.11.3
 	github.com/sirupsen/logrus v1.9.3
 	github.com/urfave/cli v1.22.17
 	golang.org/x/net v0.46.0

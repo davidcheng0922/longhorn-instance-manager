@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/cockroachdb/errors"
+	"github.com/panjf2000/ants/v2"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -19,6 +22,10 @@ import (
 	eclient "github.com/longhorn/longhorn-engine/pkg/controller/client"
 	spdkclient "github.com/longhorn/longhorn-spdk-engine/pkg/client"
 	rpc "github.com/longhorn/types/pkg/generated/imrpc"
+)
+
+const (
+	taskPoolTimeout = time.Minute
 )
 
 type ProxyOps interface {
@@ -41,7 +48,7 @@ type ProxyOps interface {
 	SnapshotClone(context.Context, *rpc.EngineSnapshotCloneRequest) (*emptypb.Empty, error)
 	SnapshotCloneStatus(context.Context, *rpc.ProxyEngineRequest) (*rpc.EngineSnapshotCloneStatusProxyResponse, error)
 	SnapshotRevert(context.Context, *rpc.EngineSnapshotRevertRequest) (*emptypb.Empty, error)
-	SnapshotPurge(context.Context, *rpc.EngineSnapshotPurgeRequest) (*emptypb.Empty, error)
+	SnapshotPurge(context.Context, *rpc.EngineSnapshotPurgeRequest, *ants.Pool) (*emptypb.Empty, error)
 	SnapshotPurgeStatus(context.Context, *rpc.ProxyEngineRequest) (*rpc.EngineSnapshotPurgeStatusProxyResponse, error)
 	SnapshotRemove(context.Context, *rpc.EngineSnapshotRemoveRequest) (*emptypb.Empty, error)
 	SnapshotHash(context.Context, *rpc.EngineSnapshotHashRequest) (*emptypb.Empty, error)
@@ -51,7 +58,7 @@ type ProxyOps interface {
 
 	SnapshotBackup(context.Context, *rpc.EngineSnapshotBackupRequest, map[string]string, []string) (*rpc.EngineSnapshotBackupProxyResponse, error)
 	SnapshotBackupStatus(context.Context, *rpc.EngineSnapshotBackupStatusRequest) (*rpc.EngineSnapshotBackupStatusProxyResponse, error)
-	BackupRestore(context.Context, *rpc.EngineBackupRestoreRequest, map[string]string) error
+	BackupRestore(context.Context, *rpc.EngineBackupRestoreRequest, map[string]string, *ants.Pool) error
 	BackupRestoreStatus(context.Context, *rpc.ProxyEngineRequest) (*rpc.EngineBackupRestoreStatusProxyResponse, error)
 
 	MetricsGet(context.Context, *rpc.ProxyEngineRequest) (*rpc.EngineMetricsGetProxyResponse, error)
@@ -66,6 +73,8 @@ type Proxy struct {
 	logsDir       string
 	HealthChecker HealthChecker
 	ops           map[rpc.DataEngine]ProxyOps
+
+	heavyTaskPool *ants.Pool
 
 	spdkServiceAddress string
 	spdkLocalClient    *spdkclient.SPDKClient
@@ -83,11 +92,18 @@ func NewProxy(ctx context.Context, logsDir, diskServiceAddress, spdkServiceAddre
 		return nil, grpcstatus.Error(grpccodes.Internal, errors.Wrapf(err, "failed to create SPDK client").Error())
 	}
 
+	heavyTaskPool, err := ants.NewPool(10)
+	if err != nil {
+		return nil, grpcstatus.Error(grpccodes.Internal, errors.Wrapf(err, "failed to new task pools").Error())
+	}
+
 	p := &Proxy{
 		ctx:           ctx,
 		logsDir:       logsDir,
 		HealthChecker: &GRPCHealthChecker{},
 		ops:           ops,
+
+		heavyTaskPool: heavyTaskPool,
 
 		spdkServiceAddress: spdkServiceAddress,
 		spdkLocalClient:    spdkLocalClient,
@@ -100,6 +116,7 @@ func NewProxy(ctx context.Context, logsDir, diskServiceAddress, spdkServiceAddre
 
 func (p *Proxy) startMonitoring() {
 	<-p.ctx.Done()
+	p.heavyTaskPool.Release()
 	logrus.Infof("%s: stopped monitoring due to the context done", types.ProxyGRPCService)
 }
 
@@ -149,4 +166,29 @@ func getSPDKClientFromAddress(address string) (*spdkclient.SPDKClient, error) {
 	}
 
 	return spdkclient.NewSPDKClient(spdkServiceAddress)
+}
+
+func submitWithResult(ctx context.Context, pool *ants.Pool, fn func() error) error {
+	// Heavy tasks themselves are asynchronous; fn() should return quickly.
+	errCh := make(chan error, 1)
+
+	if err := pool.Submit(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errCh <- fmt.Errorf("panic in task: %v", r)
+			}
+		}()
+		errCh <- fn()
+	}); err != nil {
+		return fmt.Errorf("failed to enqueue task: %w", err)
+	}
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(taskPoolTimeout):
+		return fmt.Errorf("task timed out after %v", taskPoolTimeout)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/cockroachdb/errors"
+	"github.com/panjf2000/ants/v2"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -496,24 +497,28 @@ func (p *Proxy) SnapshotPurge(ctx context.Context, req *rpc.EngineSnapshotPurgeR
 	if !ok {
 		return nil, grpcstatus.Errorf(grpccodes.Unimplemented, "unsupported data engine %v", req.ProxyEngineRequest.DataEngine)
 	}
-	return ops.SnapshotPurge(ctx, req)
+
+	return ops.SnapshotPurge(ctx, req, p.heavyTaskPool)
 }
 
-func (ops V1DataEngineProxyOps) SnapshotPurge(ctx context.Context, req *rpc.EngineSnapshotPurgeRequest) (resp *emptypb.Empty, err error) {
+func (ops V1DataEngineProxyOps) SnapshotPurge(ctx context.Context, req *rpc.EngineSnapshotPurgeRequest, heavyTaskPool *ants.Pool) (resp *emptypb.Empty, err error) {
 	task, err := esync.NewTask(ctx, req.ProxyEngineRequest.Address, req.ProxyEngineRequest.VolumeName,
 		req.ProxyEngineRequest.EngineName)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := task.PurgeSnapshots(req.SkipIfInProgress); err != nil {
-		return nil, err
+	err = submitWithResult(ctx, heavyTaskPool, func() error {
+		return task.PurgeSnapshots(req.SkipIfInProgress)
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "snapshot purge failed")
 	}
 
 	return &emptypb.Empty{}, nil
 }
 
-func (ops V2DataEngineProxyOps) SnapshotPurge(ctx context.Context, req *rpc.EngineSnapshotPurgeRequest) (resp *emptypb.Empty, err error) {
+func (ops V2DataEngineProxyOps) SnapshotPurge(ctx context.Context, req *rpc.EngineSnapshotPurgeRequest, _ *ants.Pool) (resp *emptypb.Empty, err error) {
 	c, err := getSPDKClientFromAddress(req.ProxyEngineRequest.Address)
 	if err != nil {
 		return nil, grpcstatus.Errorf(grpccodes.Internal, "failed to get SPDK client from engine address %v: %v", req.ProxyEngineRequest.Address, err)

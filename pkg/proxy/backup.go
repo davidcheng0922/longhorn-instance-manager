@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/errors"
+	"github.com/panjf2000/ants/v2"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -304,7 +305,7 @@ func (p *Proxy) BackupRestore(ctx context.Context, req *rpc.EngineBackupRestoreR
 	if !ok {
 		return nil, grpcstatus.Errorf(grpccodes.Unimplemented, "unsupported data engine %v", req.ProxyEngineRequest.DataEngine)
 	}
-	err = ops.BackupRestore(ctx, req, credential)
+	err = ops.BackupRestore(ctx, req, credential, p.heavyTaskPool)
 	if err != nil {
 		errInfo, jsonErr := json.Marshal(err)
 		if jsonErr != nil {
@@ -321,16 +322,19 @@ func (p *Proxy) BackupRestore(ctx context.Context, req *rpc.EngineBackupRestoreR
 	return resp, nil
 }
 
-func (ops V1DataEngineProxyOps) BackupRestore(ctx context.Context, req *rpc.EngineBackupRestoreRequest, credential map[string]string) error {
+func (ops V1DataEngineProxyOps) BackupRestore(ctx context.Context, req *rpc.EngineBackupRestoreRequest, credential map[string]string, heavyTaskPool *ants.Pool) error {
 	task, err := esync.NewTask(ctx, req.ProxyEngineRequest.Address, req.ProxyEngineRequest.VolumeName,
 		req.ProxyEngineRequest.EngineName)
 	if err != nil {
 		return err
 	}
-	return task.RestoreBackup(req.Url, credential, int(req.ConcurrentLimit))
+
+	return submitWithResult(ctx, heavyTaskPool, func() error {
+		return task.RestoreBackup(req.Url, credential, int(req.ConcurrentLimit))
+	})
 }
 
-func (ops V2DataEngineProxyOps) BackupRestore(ctx context.Context, req *rpc.EngineBackupRestoreRequest, credential map[string]string) error {
+func (ops V2DataEngineProxyOps) BackupRestore(ctx context.Context, req *rpc.EngineBackupRestoreRequest, credential map[string]string, _ *ants.Pool) error {
 	c, err := getSPDKClientFromAddress(req.ProxyEngineRequest.Address)
 	if err != nil {
 		return grpcstatus.Errorf(grpccodes.Internal, "failed to get SPDK client from engine address %v: %v", req.ProxyEngineRequest.Address, err)
