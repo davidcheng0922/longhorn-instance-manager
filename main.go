@@ -68,6 +68,7 @@ func main() {
 	}
 	a.Commands = []*cli.Command{
 		cmd.StartCmd(),
+		cmd.NvmeAgentCmd(),
 		cmd.ProcessCmd(),
 		cmd.VersionCmd(),
 	}
