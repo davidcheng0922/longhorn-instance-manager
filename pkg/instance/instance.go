@@ -197,14 +197,16 @@ func (ops V2DataEngineInstanceOps) InstanceCreate(req *rpc.InstanceCreateRequest
 		engine, err := c.EngineCreate(req.Spec.Name, req.Spec.VolumeName, req.Spec.SpdkInstanceSpec.Frontend, req.Spec.SpdkInstanceSpec.Size,
 			req.Spec.SpdkInstanceSpec.ReplicaAddressMap, req.Spec.PortCount, req.Spec.SpdkInstanceSpec.SalvageRequested,
 			req.Spec.SpdkInstanceSpec.SnapshotMaxCount,
-			convertIMDataLayoutTypeToSPDKDataLayoutType(req.DataLayoutType), false, nil)
+			convertIMDataLayoutTypeToSPDKDataLayoutType(req.DataLayoutType),
+			req.Spec.SpdkInstanceSpec.SharedBlock, imReservationToSPDKReservation(req.Spec.SpdkInstanceSpec.Reservation))
 		if err != nil {
 			return nil, err
 		}
 		return engineResponseToInstanceResponse(engine), nil
 	case types.InstanceTypeEngineFrontend:
 		engineFrontend, err := c.EngineFrontendCreate(req.Spec.Name, req.Spec.VolumeName, req.Spec.EngineName, req.Spec.SpdkInstanceSpec.Frontend, req.Spec.SpdkInstanceSpec.Size,
-			req.Spec.TargetAddress, int32(req.Spec.SpdkInstanceSpec.UblkQueueDepth), int32(req.Spec.SpdkInstanceSpec.UblkNumberOfQueue), int32(req.Spec.SpdkInstanceSpec.NvmeTcpNrIoQueues), false)
+			req.Spec.TargetAddress, int32(req.Spec.SpdkInstanceSpec.UblkQueueDepth), int32(req.Spec.SpdkInstanceSpec.UblkNumberOfQueue), int32(req.Spec.SpdkInstanceSpec.NvmeTcpNrIoQueues),
+			req.Spec.SpdkInstanceSpec.SharedBlock)
 		if err != nil {
 			return nil, err
 		}
@@ -1092,8 +1094,43 @@ func engineResponseToInstanceResponse(e *spdkapi.Engine) *rpc.InstanceResponse {
 			Conditions:             make(map[string]bool),
 			UblkId:                 0,
 			Uuid:                   e.UUID,
+			Reservation:            spdkReservationToIMReservation(e.Reservation),
 		},
 	}
+}
+
+func imReservationToSPDKReservation(r *rpc.InstanceReservationState) *spdkrpc.ReservationState {
+	if r == nil {
+		return nil
+	}
+	res := &spdkrpc.ReservationState{
+		Epoch:        r.Epoch,
+		Type:         r.Type,
+		HolderKey:    r.HolderKey,
+		HolderHostId: r.HolderHostId,
+		Registrants:  make([]*spdkrpc.ReservationRegistrant, 0, len(r.Registrants)),
+	}
+	for _, reg := range r.Registrants {
+		res.Registrants = append(res.Registrants, &spdkrpc.ReservationRegistrant{Key: reg.Key, HostId: reg.HostId})
+	}
+	return res
+}
+
+func spdkReservationToIMReservation(r *spdkrpc.ReservationState) *rpc.InstanceReservationState {
+	if r == nil {
+		return nil
+	}
+	res := &rpc.InstanceReservationState{
+		Epoch:        r.Epoch,
+		Type:         r.Type,
+		HolderKey:    r.HolderKey,
+		HolderHostId: r.HolderHostId,
+		Registrants:  make([]*rpc.InstanceReservationRegistrant, 0, len(r.Registrants)),
+	}
+	for _, reg := range r.Registrants {
+		res.Registrants = append(res.Registrants, &rpc.InstanceReservationRegistrant{Key: reg.Key, HostId: reg.HostId})
+	}
+	return res
 }
 
 func engineFrontendResponseToInstanceResponse(e *spdkapi.EngineFrontend) *rpc.InstanceResponse {
